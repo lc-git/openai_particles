@@ -1,4 +1,10 @@
+const { createFFmpeg, fetchFile } = FFmpeg;
+
 document.addEventListener('DOMContentLoaded', function() {
+
+  // 初始化FFmpeg
+  const ffmpeg = createFFmpeg({ log: true });
+
   // DOM elements
   const fileUpload        = document.getElementById('fileUpload');
   const gridSize          = document.getElementById('gridSize');
@@ -31,6 +37,7 @@ document.addEventListener('DOMContentLoaded', function() {
   let videoElement = null;
   let isVideo = false;
   let animationFrameId;
+  let imageFiles = [];
   
   // Default parameter values
   const defaults = {
@@ -42,6 +49,13 @@ document.addEventListener('DOMContentLoaded', function() {
     ditherType: "None",
     particleColor: "#000000"
   };
+
+  // 加载FFmpeg
+  // 加载FFmpeg核心
+  (async () => {
+    await ffmpeg.load();
+    console.log('FFmpeg核心加载完成');
+  })();
   
   // Debounce helper to limit update frequency.
   function debounce(func, wait) {
@@ -137,6 +151,63 @@ document.addEventListener('DOMContentLoaded', function() {
   function processFrame() {
     if (!imageElement && !videoElement) return;
     generateHalftone(halftoneCanvas, 1);
+  }
+
+  async function convertImagesToVideo(imageFiles, fps) {
+    if (window.SharedArrayBuffer) {
+      console.log("支持SharedArrayBuffer");
+      } else {
+      console.log("不支持SharedArrayBuffer");
+      }
+    
+
+    // 将图片写入FFmpeg虚拟文件系统
+    for (let i = 0; i < imageFiles.length; i++) {
+      const fileName = `image${i.toString().padStart(6, '0')}.jpg`;
+      ffmpeg.FS('writeFile', fileName, await fetchFile(imageFiles[i]));
+
+
+      // 更新进度
+      const progress = Math.floor(50 + (i + 1) / imageFiles.length * 30);
+      progressBar.style.width = `${progress}%`;
+      progressText.textContent = `${progress}%`;
+      frameInfo.textContent = `正在合成视频: ${i + 1}/${imageFiles.length}`;
+    }
+
+    // 更新进度
+    let progress = Math.floor(90);
+    progressBar.style.width = `${progress}%`;
+    progressText.textContent = `${progress}%`;
+    frameInfo.textContent = `输出文件中...`;
+
+    // 设置FFmpeg参数：处理图像序列
+    await ffmpeg.run(
+      '-framerate', '30',         // 输入帧率，控制每张图片作为一帧的时间（1/30秒）
+      '-i', 'image%06d.jpg',      // 匹配image000.jpg, image001.jpg等序列文件
+      '-c:v', 'libx264',          // 编码器
+      '-pix_fmt', 'yuv420p',      // 兼容的像素格式
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', // 确保分辨率为偶数
+      '-r', String(fps),                 // 输出帧率（可选，确保输出帧率与输入一致）
+      'output.mp4'
+    );
+
+    // 更新进度
+    progress = Math.floor(100);
+    progressBar.style.width = `${progress}%`;
+    progressText.textContent = `${progress}%`;
+    frameInfo.textContent = `处理完成！`;
+
+
+    // 输出文件大小，单位MB
+    const { size } = await ffmpeg.FS('stat', 'output.mp4');
+    console.log(`视频文件大小：${(size / (1024 * 1024)).toFixed(2)} MB`);
+    
+    // 读取输出视频
+    const data = await ffmpeg.FS('readFile', 'output.mp4');
+    
+    // 创建视频Blob
+    const videoBlob = new Blob([data.buffer], { type: 'video/mp4' });
+    return videoBlob;
   }
   
   function processVideoFrame() {
@@ -378,78 +449,60 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Set up MediaRecorder with optimized configuration
     const stream = recordCanvas.captureStream(fps);
-    let mediaRecorder;
-    let mimeType = 'video/mp4';
-    
-    // Check if MP4 is supported, fallback to WebM if not
-    if (!MediaRecorder.isTypeSupported('video/mp4')) {
-      mimeType = 'video/webm';
-    }
-    
-    mediaRecorder = new MediaRecorder(stream, {
-      mimeType: mimeType,
-      videoBitsPerSecond: 8000000 // Increased bitrate for better quality
-    });
-    
-    const chunks = [];
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        chunks.push(e.data);
-      }
-    };
-    
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mimeType });
-      progressBar.style.width = '100%';
-      progressText.textContent = '100%';
-      frameInfo.textContent = '处理完成！';
-      
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `particles_video.${mimeType.split('/')[1]}`;
-      link.click();
-      URL.revokeObjectURL(link.href);
-      
-      // Hide progress panel after a short delay
-      setTimeout(() => {
-        progressPanel.style.display = 'none';
-      }, 1000);
-    };
-    
-    mediaRecorder.start(1000); // Collect data every second
     
     // Process each frame
     let currentFrame = 0;
+    imageFiles = [];
+
     const processNextFrame = async () => {
       if (currentFrame >= totalFrames) {
-        mediaRecorder.stop();
+        // mediaRecorder.stop();
+        // zip.generateAsync({ type: "blob" }).then(function (content) {
+        //   const link = document.createElement("a");
+        //   link.href = URL.createObjectURL(content);
+        //   link.download = "halftone_frames.zip";
+        //   link.click();
+        // });
+        const videoBlob = await convertImagesToVideo(imageFiles, fps);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(videoBlob);
+        link.download = 'particles_video.mp4';
+        link.click();
         return;
       }
       
       // 使用精确的时间控制
       const frameTime = currentFrame / fps;
-      if (Math.abs(videoElement.currentTime - frameTime) > 0.1) {
-        videoElement.currentTime = frameTime;
-        await new Promise(resolve => {
-          const onSeeked = () => {
-            videoElement.removeEventListener('seeked', onSeeked);
-            resolve();
-          };
-          videoElement.addEventListener('seeked', onSeeked);
-        });
-      }
+      videoElement.currentTime = frameTime;
+
+      // if (Math.abs(videoElement.currentTime - frameTime) > 0.1) {
+      //   videoElement.currentTime = frameTime;
+      //   await new Promise(resolve => {
+      //     const onSeeked = () => {
+      //       videoElement.removeEventListener('seeked', onSeeked);
+      //       resolve();
+      //     };
+      //     videoElement.addEventListener('seeked', onSeeked);
+      //   });
+      // }
       
       generateHalftone(recordCanvas, 2);
+      imageFiles.push(recordCanvas.toDataURL("image/jpeg"));
+
       
       // 更新进度
-      const progress = Math.floor((currentFrame + 1) / totalFrames * 95);
+      const progress = Math.floor((currentFrame + 1) / totalFrames * 50);
       progressBar.style.width = `${progress}%`;
       progressText.textContent = `${progress}%`;
       frameInfo.textContent = `正在处理帧: ${currentFrame + 1}/${totalFrames}`;
       
       currentFrame++;
       // 使用requestAnimationFrame直接处理下一帧，移除setTimeout
-      requestAnimationFrame(processNextFrame);
+      // requestAnimationFrame(processNextFrame);
+      // 使用 setTimeout 模拟下载的延迟
+      setTimeout(() => {
+          processNextFrame();
+      }, 100); // 延迟100毫秒或根据需要调整
     };
     
     processNextFrame();
